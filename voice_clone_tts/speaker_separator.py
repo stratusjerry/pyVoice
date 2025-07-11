@@ -122,9 +122,9 @@ class SpeakerSeparator:
         # Load audio
         audio, sr = librosa.load(audio_file, sr=16000)
         
-        # Parameters for windowing
-        window_size = int(2.0 * sr)  # 2 second windows
-        hop_size = int(0.5 * sr)     # 0.5 second hop
+        # Parameters for windowing - reduced window size for smoother audio
+        window_size = int(1.0 * sr)  # 1 second windows
+        hop_size = int(0.25 * sr)    # 0.25 second hop for better overlap
         
         # Extract features for each window
         features = []
@@ -162,24 +162,45 @@ class SpeakerSeparator:
         kmeans = KMeans(n_clusters=num_speakers, random_state=42, n_init=10)
         labels = kmeans.fit_predict(features_normalized)
         
-        # Group audio segments by speaker
-        speaker_audio = {}
+        # Group audio segments by speaker with better continuity
+        speaker_segments = {}
         
         for i, label in enumerate(labels):
             speaker_id = f"speaker_{label}"
-            if speaker_id not in speaker_audio:
-                speaker_audio[speaker_id] = []
+            if speaker_id not in speaker_segments:
+                speaker_segments[speaker_id] = []
             
-            # Extract audio segment
+            # Store segment info for merging continuous segments
             start_sample = i * hop_size
             end_sample = min(start_sample + window_size, len(audio))
-            segment = audio[start_sample:end_sample]
-            
-            speaker_audio[speaker_id].append(segment)
+            speaker_segments[speaker_id].append((start_sample, end_sample))
         
-        # Concatenate segments for each speaker
-        for speaker in speaker_audio:
-            speaker_audio[speaker] = np.concatenate(speaker_audio[speaker])
+        # Merge continuous segments and extract audio
+        speaker_audio = {}
+        for speaker_id, segments in speaker_segments.items():
+            # Sort segments by start time
+            segments.sort(key=lambda x: x[0])
+            
+            # Merge overlapping/adjacent segments
+            merged_segments = []
+            current_start, current_end = segments[0]
+            
+            for start, end in segments[1:]:
+                if start <= current_end + hop_size:  # Allow small gaps
+                    current_end = max(current_end, end)
+                else:
+                    merged_segments.append((current_start, current_end))
+                    current_start, current_end = start, end
+            
+            merged_segments.append((current_start, current_end))
+            
+            # Extract merged audio segments
+            audio_segments = []
+            for start, end in merged_segments:
+                segment = audio[start:end]
+                audio_segments.append(segment)
+            
+            speaker_audio[speaker_id] = np.concatenate(audio_segments)
         
         # Post-process: merge very short segments and clean up
         speaker_audio = self._post_process_speakers(speaker_audio, min_duration=5.0, sr=sr)
@@ -230,5 +251,6 @@ class SpeakerSeparator:
         
         for speaker_id, audio in speaker_audio.items():
             output_path = os.path.join(output_dir, f"{speaker_id}.wav")
-            sf.write(output_path, audio, sr)
+            # Save with better quality settings
+            sf.write(output_path, audio, sr, subtype='PCM_16')
             print(f"Saved {speaker_id} audio to {output_path}")
